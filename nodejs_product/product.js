@@ -194,12 +194,12 @@ app.post('/product/products', function(req, httpRes) {
 
 //reduce product through post, this is for the checkout process 
 app.post('/product/reduce', function(req, httpRes) {
+	"use strict";
 	client.authrep_with_user_key({ service_token: serviceToken,
 															 service_id: serviceId,
 															 user_key: userKey,
 															 usage: { 'reduce_product': 1 } }, function(response){
 		if(response.is_success()) {	
-			"use strict";
 			let sendReply = false;
 			
 			pool.getConnection(function(err, conn) {
