@@ -2,6 +2,12 @@ const express = require('express');
 const app     = express();
 const bodyParser = require('body-parser');
 
+var Client = require('3scale').Client;
+client = new Client({host: process.env.THREESCALE_BACKEND_URL, port: 443});
+const serviceToken = process.env.THREESCALE_SERVICE_TOKEN;
+const serviceId = process.env.THREESCALE_SERVICE_ID;
+const userKey = process.env.THREESCALE_USER_KEY;
+
 app.use(bodyParser.json());
 
 
@@ -21,178 +27,222 @@ console.log('!!!!!!!!!!!!!!!!!!!!!!dbHost ' + dbHost);
 
 const mysql  = require('mysql');
 const pool = mysql.createPool({
-  connectionLimit : 5,
-  host            : dbHost,
-  user            : dbUser,
-  password        : dbPassword,
-  database        : dbDatabase
+	connectionLimit : 5,
+	host            : dbHost,
+	user            : dbUser,
+	password        : dbPassword,
+	database        : dbDatabase
 });
 
 
 //get either featured products or products with keyword
 app.get('/product/products', function(req, httpRes) {
-	if(req.query.featured == null && req.query.keyword == null) {
-		httpRes.statusCode = 400;
-		return httpRes.send('All products cannot be returned, need to provide a search condition');
-	}
+	client.authrep_with_user_key({ service_token: serviceToken,
+															 service_id: serviceId,
+															 user_key: userKey,
+															 usage: { 'list_products': 1 } }, function(response){
+		if(response.is_success()) {
+			if(req.query.featured == null && req.query.keyword == null) {
+				httpRes.statusCode = 400;
+				return httpRes.send('All products cannot be returned, need to provide a search condition');
+			}
 
+			pool.getConnection(function(err, conn) {
+				if (req.query.featured != null) {
+					conn.query('select sku, availability, description, featured=1 as featured, height, image, length, name, price, weight, width from Product where featured=true', function(err, records) {
+						if(err) throw err;
+						httpRes.json(records);
+					});
+				} else if (req.query.keyword != null){
+					conn.query('select sku, availability, description, featured=1 as featured, height, image, length, name, price, weight, width from Product where SKU in (select SKU from PRODUCT_KEYWORD where Keyword = ?)', req.query.keyword, function(err, records) {
+						if(err) throw err;
+						httpRes.json(records);
+					});
 
-	pool.getConnection(function(err, conn) {
-		if (req.query.featured != null) {
-			conn.query('select sku, availability, description, featured=1 as featured, height, image, length, name, price, weight, width from Product where featured=true', function(err, records) {
-				if(err) throw err;
-				httpRes.json(records);
+				} 
+						conn.release();
 			});
-		} else if (req.query.keyword != null){
-			conn.query('select sku, availability, description, featured=1 as featured, height, image, length, name, price, weight, width from Product where SKU in (select SKU from PRODUCT_KEYWORD where Keyword = ?)', req.query.keyword, function(err, records) {
-				if(err) throw err;
-				httpRes.json(records);
-			});
 
-		} 
-	    	conn.release();
+		} else {
+			return httpRes.status(403).send('Call not authorized: '+ response.error_message);
+		}
 	});
 });
 
 
 //get based on sku #
 app.get('/product/products/:sku', function(req, httpRes) {
-	pool.getConnection(function(err, conn) {
-		conn.query('select sku, availability, description, featured=1 as featured, height, image, length, name, price, weight, width from Product where SKU = ? ', req.params.sku, function(err, records) {
-			if(err) throw err;
-			httpRes.json(records[0]);
-		});
-	    	conn.release();
+	client.authrep_with_user_key({ service_token: serviceToken,
+															 service_id: serviceId,
+															 user_key: userKey,
+															 usage: { 'get_product': 1 } }, function(response){
+		if(response.is_success()) {                               	
+			pool.getConnection(function(err, conn) {
+				conn.query('select sku, availability, description, featured=1 as featured, height, image, length, name, price, weight, width from Product where SKU = ? ', req.params.sku, function(err, records) {
+					if(err) throw err;
+					httpRes.json(records[0]);
+				});
+						conn.release();
+			});
+		} else {
+			return httpRes.status(403).send('Call not authorized: '+ response.error_message);
+		}
 	});
 });
 
 
 //add keyword through post 
 app.post('/product/keywords', function(req, httpRes) {
-	const record= { KEYWORD: req.body.keyword};
-	pool.getConnection(function(err, conn) {
-		conn.query('INSERT INTO Keyword SET ?', record, function(err, records) {
-			if(err) throw err;
-			const result = {
-				keyword : req.body.keyword,
-  				products : null}
-	  		httpRes.json(result);
-		});
-	    	conn.release();
+	client.authrep_with_user_key({ service_token: serviceToken,
+															 service_id: serviceId,
+															 user_key: userKey,
+															 usage: { 'create_keyword': 1 } }, function(response){
+		if(response.is_success()) {
+			const record= { KEYWORD: req.body.keyword};
+			pool.getConnection(function(err, conn) {
+				conn.query('INSERT INTO Keyword SET ?', record, function(err, records) {
+					if(err) throw err;
+					const result = {
+						keyword : req.body.keyword,
+							products : null}
+						httpRes.json(result);
+				});
+						conn.release();
+			});
+		} else {
+			return httpRes.status(403).send('Call not authorized: '+ response.error_message);
+		}
 	});
-
 });
 
 
 //add product through post 
 app.post('/product/products', function(req, httpRes) {
 	//To use "let" need strict mode in node version 4.*
-	"use strict";
-	pool.getConnection(function(err, dbconn) {
+	"use strict";	
+	client.authrep_with_user_key({ service_token: serviceToken,
+															 service_id: serviceId,
+															 user_key: userKey,
+															 usage: { 'create_product': 1 } }, function(response){
+		if(response.is_success()) {
+			pool.getConnection(function(err, dbconn) {
 
-		// Begin transaction
-		dbconn.beginTransaction(function(err) {
-		  	if (err) { throw err; }
+				// Begin transaction
+				dbconn.beginTransaction(function(err) {
+						if (err) { throw err; }
 
-			let featured = 0;
-			if (req.body.featured = 'true') 
-				featured = 1;
+					let featured = 0;
+					if (req.body.featured = 'true') 
+						featured = 1;
 
-			let record= { DESCRIPTION: req.body.description, HEIGHT: req.body.height, LENGTH: req.body.length,  NAME: req.body.name, WEIGHT: req.body.weight, WIDTH: req.body.width, FEATURED: featured, 	AVAILABILITY: req.body.availability, IMAGE: req.body.image, PRICE: req.body.price};
+					let record= { DESCRIPTION: req.body.description, HEIGHT: req.body.height, LENGTH: req.body.length,  NAME: req.body.name, WEIGHT: req.body.weight, WIDTH: req.body.width, FEATURED: featured, 	AVAILABILITY: req.body.availability, IMAGE: req.body.image, PRICE: req.body.price};
 
-			dbconn.query('INSERT INTO Product SET ?', record, function(err,dbRes){
-		    		if (err) { 
-		      			dbconn.rollback(function() {
-					throw err;
-		      			});
-		    		}
+					dbconn.query('INSERT INTO Product SET ?', record, function(err,dbRes){
+								if (err) { 
+										dbconn.rollback(function() {
+							throw err;
+										});
+								}
 
-				const tmpSku = dbRes.insertId;
-		 		record = {KEYWORD: req.body.image, SKU: tmpSku};
+						const tmpSku = dbRes.insertId;
+						record = {KEYWORD: req.body.image, SKU: tmpSku};
 
-				dbconn.query('INSERT INTO PRODUCT_KEYWORD SET ?', record, function(err,dbRes){
-			      		if (err) { 
-						dbconn.rollback(function() {
-				  		throw err;
-						});
-			      		}  
-					console.log('record insert into PRODUCT_KEYWORD table');
-				      	dbconn.commit(function(err) {
-				      		if (err) { 
-							dbconn.rollback(function() {
-					  		throw err;
-							});
-			      			}  
-					console.log('inserted into both Product and PRODUCT_KEYWORD tables in one transcation ');
+						dbconn.query('INSERT INTO PRODUCT_KEYWORD SET ?', record, function(err,dbRes){
+										if (err) { 
+								dbconn.rollback(function() {
+									throw err;
+								});
+										}  
+							console.log('record insert into PRODUCT_KEYWORD table');
+										dbconn.commit(function(err) {
+											if (err) { 
+									dbconn.rollback(function() {
+										throw err;
+									});
+											}  
+							console.log('inserted into both Product and PRODUCT_KEYWORD tables in one transcation ');
 
-					const result = {
-						sku : tmpSku,
-					  	name : req.body.name,
-						description : req.body.description,
-						length : req.body.length,
-						width : req.body.width, 
-						height : req.body.height,
-						weight : req.body.weight,
-						featured : req.body.featured, 
-						availability : req.body.availability,
-						price : req.body.price, 
-						image : req.body.image
-						};
+							const result = {
+								sku : tmpSku,
+									name : req.body.name,
+								description : req.body.description,
+								length : req.body.length,
+								width : req.body.width, 
+								height : req.body.height,
+								weight : req.body.weight,
+								featured : req.body.featured, 
+								availability : req.body.availability,
+								price : req.body.price, 
+								image : req.body.image
+								};
 
-		  			httpRes.json(result);
+								httpRes.json(result);
 
-			      		}); //end commit
-		    		}); //end 2nd query
-		  	}); //end 1st query
-		});
-		// End transaction
+										}); //end commit
+								}); //end 2nd query
+						}); //end 1st query
+				});
+				// End transaction
 
-	    	dbconn.release();
-	});//end pool.getConnection
+						dbconn.release();
+			});//end pool.getConnection
+		} else {
+			return httpRes.status(403).send('Call not authorized: '+ response.error_message);
+		}
+	});
 });
 
 //reduce product through post, this is for the checkout process 
 app.post('/product/reduce', function(req, httpRes) {
-	"use strict";
-	let sendReply = false;
-	
-	pool.getConnection(function(err, conn) {
-		for (let i = 0; i < req.body.length; i++) {
-			if(!req.body[i].hasOwnProperty('sku') || !req.body[i].hasOwnProperty('quantity')) {
-				httpRes.statusCode = 400;
-				return httpRes.send('Error 400: need to have valid sku and quantity.');
-			}
-
-			const tmpSku = req.body[i]['sku'];
-			const tmpQuantity = req.body[i]['quantity'];
-			const sqlStr = 'update Product set availability = availability - ' + tmpQuantity + ' where sku = ' + tmpSku + ' and availability - ' + tmpQuantity + ' > 0'; 
-			console.log('reduce tmpSku:' + tmpSku);
-			console.log('reduce tmpQuantity:' + tmpQuantity);
-			console.log('reduce sqlStr: ' + sqlStr);
-
-			conn.query(sqlStr, function(err, result) {
-				if(err) throw err;
-
-			  	if (result.affectedRows > 0) {
-					console.log('reduced from Product ' + result.affectedRows + ' rows');
-			  	} else {
-					const result = [
-					  { message : 'Insufficient availability for ' + tmpSku,
-					  details : null}
-					];
-					if (sendReply == false) {
-						httpRes.json(result);
-						sendReply = true;
+	client.authrep_with_user_key({ service_token: serviceToken,
+															 service_id: serviceId,
+															 user_key: userKey,
+															 usage: { 'reduce_product': 1 } }, function(response){
+		if(response.is_success()) {	
+			"use strict";
+			let sendReply = false;
+			
+			pool.getConnection(function(err, conn) {
+				for (let i = 0; i < req.body.length; i++) {
+					if(!req.body[i].hasOwnProperty('sku') || !req.body[i].hasOwnProperty('quantity')) {
+						httpRes.statusCode = 400;
+						return httpRes.send('Error 400: need to have valid sku and quantity.');
 					}
 
-			  	}
+					const tmpSku = req.body[i]['sku'];
+					const tmpQuantity = req.body[i]['quantity'];
+					const sqlStr = 'update Product set availability = availability - ' + tmpQuantity + ' where sku = ' + tmpSku + ' and availability - ' + tmpQuantity + ' > 0'; 
+					console.log('reduce tmpSku:' + tmpSku);
+					console.log('reduce tmpQuantity:' + tmpQuantity);
+					console.log('reduce sqlStr: ' + sqlStr);
+
+					conn.query(sqlStr, function(err, result) {
+						if(err) throw err;
+
+							if (result.affectedRows > 0) {
+							console.log('reduced from Product ' + result.affectedRows + ' rows');
+							} else {
+							const result = [
+								{ message : 'Insufficient availability for ' + tmpSku,
+								details : null}
+							];
+							if (sendReply == false) {
+								httpRes.json(result);
+								sendReply = true;
+							}
+
+							}
+					});
+
+
+				}
+						conn.release();
 			});
-
-
+			return httpRes.send('');;
+		} else {
+			return httpRes.status(403).send('Call not authorized: '+ response.error_message);
 		}
-    		conn.release();
 	});
-	return httpRes.send('');;
 });
 
 
@@ -206,54 +256,80 @@ app.post('/product/classify/:sku', function(req, httpRes) {
 
 //delete based on sku #
 app.delete('/product/products/:sku', function(req, httpRes) {
+	client.authrep_with_user_key({ service_token: serviceToken,
+															 service_id: serviceId,
+															 user_key: userKey,
+															 usage: { 'delete_product': 1 } }, function(response){
+		if(response.is_success()) {	
+			pool.getConnection(function(err, dbconn) {
 
-	pool.getConnection(function(err, dbconn) {
+				// Begin transaction
+				dbconn.beginTransaction(function(err) {
+						if (err) { throw err; }
+						dbconn.query('DELETE FROM PRODUCT_KEYWORD where SKU = ?', req.params.sku, function(err, result){
+								if (err) { 
+										dbconn.rollback(function() {
+							throw err;
+										});
+								}
+					console.log('deleted from PRODUCT_KEYWORD ' + result.affectedRows + ' rows');
+				 
+					dbconn.query('DELETE FROM Product where SKU = ?', req.params.sku, function(err, result){
+									if (err) { 
+							dbconn.rollback(function() {
+								throw err;
+							});
+									}  
+						console.log('deleted from Product ' + result.affectedRows + ' rows');
+									dbconn.commit(function(err) {
+										if (err) { 
+								dbconn.rollback(function() {
+									throw err;
+								});
+										}  
+							console.log('Transaction Complete.');
+								httpRes.json('deleted from both Product and PRODUCT_KEYWORD tables in one transcation');
 
-		// Begin transaction
-		dbconn.beginTransaction(function(err) {
-		  	if (err) { throw err; }
-		  	dbconn.query('DELETE FROM PRODUCT_KEYWORD where SKU = ?', req.params.sku, function(err, result){
-		    		if (err) { 
-		      			dbconn.rollback(function() {
-					throw err;
-		      			});
-		    		}
-			console.log('deleted from PRODUCT_KEYWORD ' + result.affectedRows + ' rows');
-		 
-			dbconn.query('DELETE FROM Product where SKU = ?', req.params.sku, function(err, result){
-		      		if (err) { 
-					dbconn.rollback(function() {
-			  		throw err;
-					});
-		      		}  
-				console.log('deleted from Product ' + result.affectedRows + ' rows');
-			      	dbconn.commit(function(err) {
-			      		if (err) { 
-						dbconn.rollback(function() {
-				  		throw err;
-						});
-			      		}  
-					console.log('Transaction Complete.');
-		  			httpRes.json('deleted from both Product and PRODUCT_KEYWORD tables in one transcation');
+									}); //end commit
+							}); //end 2nd query
+					}); //end 1st query
+				});
+				// End transaction
 
-			      	}); //end commit
-		    	}); //end 2nd query
-		  }); //end 1st query
-		});
-		// End transaction
-
-	    	dbconn.release();
-	});//end pool.getConnection
+						dbconn.release();
+			});//end pool.getConnection
+		} else {
+			return httpRes.status(403).send('Call not authorized: '+ response.error_message);
+		}
+	});
 });
 
 //put (update) based on sku #
 app.put('/product/products/:sku', function(req, res) {
-	updateProduct(req.params.sku, req, res);
+	client.authrep_with_user_key({ service_token: serviceToken,
+															 service_id: serviceId,
+															 user_key: userKey,
+															 usage: { 'update_product': 1 } }, function(response){
+		if(response.is_success()) {		
+			updateProduct(req.params.sku, req, res);
+		} else {
+			return httpRes.status(403).send('Call not authorized: '+ response.error_message);
+		}
+	});
 });
 
 //patch (update) based on sku #
 app.patch('/product/products/:sku', function(req, res) {
-	updateProduct(req.params.sku, req, res);
+	client.authrep_with_user_key({ service_token: serviceToken,
+															 service_id: serviceId,
+															 user_key: userKey,
+															 usage: { 'update_product': 1 } }, function(response){
+		if(response.is_success()) {		
+			updateProduct(req.params.sku, req, res);
+		} else {
+			return httpRes.status(403).send('Call not authorized: '+ response.error_message);
+		}
+	});
 });
 
 
@@ -301,7 +377,7 @@ function updateProduct(skuIn, req, httpRes) {
 		sqlStr = sqlStr + 'PRICE = \'' + req.body.PRICE + "\'";
 	}
 	sqlStr = 'UPDATE Product SET ' + sqlStr + ' WHERE SKU = ?';
-    	console.log('!!!!!SQL ready to be executed: ' + sqlStr);
+			console.log('!!!!!SQL ready to be executed: ' + sqlStr);
 
 
 	pool.getConnection(function(err, conn) {
@@ -309,19 +385,19 @@ function updateProduct(skuIn, req, httpRes) {
 			if(err) throw err;
 			console.log('update Product table' + result.affectedRows + ' rows');
 		});
-	    	conn.release();
+				conn.release();
 	});
 
-  	httpRes.json('Update Product table');
+		httpRes.json('Update Product table');
 }
 
 //close connection pool when detected ctrl-c command
 process.on('SIGINT', function() {
-    	console.log("Caught interrupt signal");
+			console.log("Caught interrupt signal");
 
-    	pool.end(function (err) {
-	    	console.log("Closed connection pool");
-	        process.exit();
+			pool.end(function (err) {
+				console.log("Closed connection pool");
+					process.exit();
 	});
 
 });
